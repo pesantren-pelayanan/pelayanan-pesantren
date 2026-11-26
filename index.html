@@ -549,6 +549,7 @@
       submitApplication: { rpc: 'submit_application', params: ['p_data'] },
       trackApplication: { rpc: 'track_application', params: ['p_application_number', 'p_nik'] },
       downloadDocument: { rpc: 'download_document', params: ['p_application_number', 'p_nik', 'p_document_id'] },
+      downloadApplicantFile: { rpc: 'download_applicant_file', params: ['p_token', 'p_application_id', 'p_file_name'] },
       getAdminDashboard: { rpc: 'get_admin_dashboard', params: ['p_token', 'p_filters'] },
       getApplicationDetail: { rpc: 'get_application_detail', params: ['p_token', 'p_application_id'] },
       updateApplicationStatus: { rpc: 'update_application_status', params: ['p_token', 'p_application_id', 'p_status', 'p_admin_note'] },
@@ -700,18 +701,51 @@
         '<h3>Formulir Pengajuan</h3>'
         + '<p class="sub">' + (svc ? esc(svc.ServiceName) : 'Pilih layanan') + ' — isi data dengan benar. Tidak perlu membuat akun.</p>'
         + '<div class="form-grid">'
-        + '<div class="full"><label class="f">Layanan <span class="req">*</span></label><select id="appService" class="f">' + options + '</select></div>'
+        + '<div class="full"><label class="f">Layanan <span class="req">*</span></label><select id="appService" class="f" onchange="renderApplyFiles()">' + options + '</select></div>'
         + '<div><label class="f">Nama Lengkap <span class="req">*</span></label><input id="appName" class="f" placeholder="Nama sesuai KTP"></div>'
         + '<div><label class="f">NIK (16 digit) <span class="req">*</span></label><input id="appNik" class="f" inputmode="numeric" maxlength="16" placeholder="3328xxxxxxxxxxxx"></div>'
         + '<div><label class="f">No. HP / WhatsApp <span class="req">*</span></label><input id="appPhone" class="f" placeholder="08xxxxxxxxxx"></div>'
         + '<div><label class="f">Alamat (RT/RW, Dusun)</label><input id="appAddress" class="f" placeholder="cth: RT 02 RW 03, Dusun Krajan"></div>'
         + '<div class="full"><label class="f">Catatan (opsional)</label><textarea id="appNotes" class="f" rows="2" placeholder="Keterangan tambahan bila ada"></textarea></div>'
         + '</div>'
-        + '<p class="hint">Berkas syarat (fotokopi KK, KTP, dll.) dibawa saat pengambilan atau difoto dan dikirim ke admin desa via WhatsApp bila diminta.</p>'
+        + '<h4 style="margin-top: 14px;">Berkas Syarat (wajib diunggah)</h4>'
+        + '<div id="applyFiles"></div>'
+        + '<p class="hint">Foto/scan berkas dalam format JPG, PNG, atau PDF, maks 5 MB per file.</p>'
         + '<div class="form-actions"><button class="btn btn-green" onclick="submitApplicationForm()"><i class="fa-solid fa-paper-plane"></i> Kirim Pengajuan</button>'
         + '<button class="btn btn-ghost" onclick="closeModal()">Batal</button></div>'
         + '<div id="applyResult"></div>'
       );
+      renderApplyFiles();
+    }
+
+    /* Kolom upload berkas: satu file untuk tiap syarat layanan yang dipilih. */
+    function renderApplyFiles() {
+      const box = $('applyFiles');
+      if (!box) return;
+      const svc = STATE.services.find(function (s) { return s.ServiceID === $('appService').value; });
+      const reqs = (svc && svc.Requirements) || [];
+      if (!reqs.length) { box.innerHTML = '<p style="color: var(--muted);">Layanan ini tidak mensyaratkan berkas.</p>'; return; }
+      box.innerHTML = reqs.map(function (r, i) {
+        return '<div style="margin-bottom: 10px;"><label class="f">' + esc(r) + ' <span class="req">*</span></label>'
+          + '<input type="file" class="f apply-file" data-req="' + esc(r) + '" accept="image/*,.pdf,.doc,.docx">'
+          + '<div style="font-size: 12.5px; color: var(--muted);" id="applyFileName' + i + '"></div></div>';
+      }).join('');
+      box.querySelectorAll('.apply-file').forEach(function (input, i) {
+        input.addEventListener('change', function () {
+          $('applyFileName' + i).textContent = input.files.length
+            ? 'Terpilih: ' + input.files[0].name + ' (' + fmtSize(input.files[0].size) + ')'
+            : '';
+        });
+      });
+    }
+
+    function readFileAsDataURL(file) {
+      return new Promise(function (resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function () { resolve(reader.result); };
+        reader.onerror = function () { reject(new Error('File tidak bisa dibaca.')); };
+        reader.readAsDataURL(file);
+      });
     }
 
     async function submitApplicationForm() {
@@ -727,6 +761,29 @@
         showToast('Lengkapi nama, NIK 16 digit, dan nomor HP/WA.', 'warning');
         return;
       }
+      const files = [];
+      const inputs = Array.prototype.slice.call(document.querySelectorAll('.apply-file'));
+      for (let i = 0; i < inputs.length; i++) {
+        const input = inputs[i];
+        const req = input.getAttribute('data-req');
+        if (!input.files || !input.files.length) {
+          showToast('Berkas wajib diunggah: ' + req, 'warning');
+          return;
+        }
+        const file = input.files[0];
+        if (file.size > 5 * 1024 * 1024) {
+          showToast('Ukuran berkas maksimal 5 MB: ' + file.name, 'error');
+          return;
+        }
+        try {
+          const dataUrl = await readFileAsDataURL(file);
+          files.push({ Requirement: req, FileName: file.name, FileType: file.type || 'application/octet-stream', FileData: dataUrl });
+        } catch (e) {
+          showToast('File tidak bisa dibaca: ' + file.name, 'error');
+          return;
+        }
+      }
+      payload.Files = files;
       try {
         const res = await callBackend('submitApplication', [payload], 'Mengirim pengajuan...');
         if (!res || !res.success) { showToast((res && res.message) || 'Pengajuan gagal.', 'error'); return; }
@@ -773,6 +830,12 @@
         } else {
           docsHtml = '<p style="color: var(--muted); margin-top: 12px;">Dokumen bisa diunduh setelah status menjadi Selesai.</p>';
         }
+        let appFilesHtml = '';
+        if ((a.ApplicantFiles || []).length) {
+          appFilesHtml = '<h4 style="margin-top: 16px;">Berkas yang Anda Lampirkan</h4>' + a.ApplicantFiles.map(function (f) {
+            return '<div class="doc-row"><i class="fa-solid fa-file"></i><span class="nm">' + esc(f.Requirement) + '</span><span class="sz">' + esc(f.FileName) + ' • ' + fmtSize(f.FileSize) + '</span></div>';
+          }).join('');
+        }
         box.innerHTML = '<div style="margin-top: 16px;"><span class="badge ' + esc(a.Status) + '">' + esc(a.Status) + '</span>'
           + '<dl class="kv"><dt>Nomor Pengajuan</dt><dd>' + esc(a.ApplicationNumber) + '</dd>'
           + '<dt>Layanan</dt><dd>' + esc(a.ServiceName) + '</dd>'
@@ -780,7 +843,7 @@
           + '<dt>Diajukan</dt><dd>' + fmtDate(a.CreatedAt) + '</dd>'
           + (a.CompletedAt ? '<dt>Selesai</dt><dd>' + fmtDate(a.CompletedAt) + '</dd>' : '')
           + (a.AdminNote ? '<dt>Catatan Admin</dt><dd>' + esc(a.AdminNote) + '</dd>' : '')
-          + '</dl>' + statusTimeline(a.Status) + docsHtml + '</div>';
+          + '</dl>' + statusTimeline(a.Status) + appFilesHtml + docsHtml + '</div>';
       } catch (e) { /* sudah di-toast */ }
     }
 
@@ -795,6 +858,21 @@
         a.click();
         a.remove();
         showToast('Dokumen sedang diunduh.', 'success');
+      } catch (e) { /* sudah di-toast */ }
+    }
+
+    /* Admin: unduh satu berkas yang dilampirkan pemohon. */
+    async function downloadApplicantFile(appId, fileName) {
+      try {
+        const res = await callBackend('downloadApplicantFile', [STATE.token, appId, fileName], 'Menyiapkan berkas...');
+        if (!res || !res.success) { showToast((res && res.message) || 'Berkas gagal diunduh.', 'error'); return; }
+        const a = document.createElement('a');
+        a.href = res.FileData;
+        a.download = res.FileName || fileName || 'berkas';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showToast('Berkas sedang diunduh.', 'success');
       } catch (e) { /* sudah di-toast */ }
     }
 
@@ -882,7 +960,7 @@
         $('appsTable').innerHTML = apps.length ? apps.map(function (a) {
           return '<tr><td><b>' + esc(a.ApplicationNumber) + '</b></td>'
             + '<td>' + esc(a.ApplicantName) + '<br><span style="color: var(--muted); font-size: 12.5px;">' + esc(a.NikMasked) + ' • ' + esc(a.Phone) + '</span></td>'
-            + '<td>' + esc(a.ServiceName) + '</td>'
+            + '<td>' + esc(a.ServiceName) + ((a.ApplicantFiles || []).length ? '<br><span style="color: var(--muted); font-size: 12.5px;"><i class="fa-solid fa-paperclip"></i> ' + a.ApplicantFiles.length + ' berkas</span>' : '') + '</td>'
             + '<td>' + fmtDate(a.CreatedAt) + '</td>'
             + '<td><span class="badge ' + esc(a.Status) + '">' + esc(a.Status) + '</span></td>'
             + '<td><button class="btn btn-ghost btn-sm" onclick="openApplicationDetail(\'' + esc(a.ApplicationID) + '\')">Kelola</button></td></tr>';
@@ -899,6 +977,10 @@
           return '<div class="doc-row"><i class="fa-solid fa-file"></i><span class="nm">' + esc(d.FileName) + '</span><span class="sz">' + fmtSize(d.FileSize) + ' • ' + fmtDate(d.UploadedAt) + '</span>'
             + '<button class="btn btn-danger btn-sm" onclick="deleteDoc(\'' + esc(d.DocumentID) + '\', \'' + esc(a.ApplicationID) + '\')"><i class="fa-solid fa-trash"></i></button></div>';
         }).join('') || '<p style="color: var(--muted);">Belum ada dokumen.</p>';
+        const appFiles = (a.ApplicantFiles || []).map(function (f) {
+          return '<div class="doc-row"><i class="fa-solid fa-file"></i><span class="nm">' + esc(f.Requirement) + '</span><span class="sz">' + esc(f.FileName) + ' • ' + fmtSize(f.FileSize) + '</span>'
+            + '<button class="btn btn-green btn-sm" onclick="downloadApplicantFile(\'' + esc(a.ApplicationID) + '\', \'' + esc(f.FileName) + '\')"><i class="fa-solid fa-download"></i> Unduh</button></div>';
+        }).join('') || '<p style="color: var(--muted);">Tidak ada berkas terlampir.</p>';
         openModal(
           '<h3>' + esc(a.ApplicationNumber) + '</h3>'
           + '<p class="sub">' + esc(a.ServiceName) + ' • <span class="badge ' + esc(a.Status) + '">' + esc(a.Status) + '</span></p>'
@@ -910,6 +992,8 @@
           + '<dt>Diajukan</dt><dd>' + fmtDate(a.CreatedAt) + '</dd>'
           + (a.CompletedAt ? '<dt>Selesai</dt><dd>' + fmtDate(a.CompletedAt) + '</dd>' : '')
           + '</dl>'
+          + '<h4 style="margin-top: 18px;">Berkas dari Pemohon</h4>'
+          + appFiles
           + '<label class="f">Ubah Status</label><select id="admStatus" class="f">'
           + ['DIAJUKAN', 'DITERIMA', 'DIPROSES', 'SELESAI', 'DITOLAK'].map(function (st) {
               return '<option' + (st === a.Status ? ' selected' : '') + '>' + st + '</option>';
